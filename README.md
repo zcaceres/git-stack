@@ -59,14 +59,20 @@ curl -fsSL https://github.com/zcaceres/git-stack/releases/latest/download/git-st
 
 This keeps each consumer repo self-contained — no runtime dependency on this repo.
 
-## Testing
+## Development setup
 
 ```bash
 bun install
-bats test/
+git config core.hooksPath .githooks
 ```
 
-Tests use sandboxed git repos and mock `gh`, so no GitHub access is needed.
+This installs the BATS test framework and enables the pre-push hook, which runs the full test suite before every push. Tests use sandboxed git repos and mock `gh`, so no GitHub access is needed.
+
+To run tests manually:
+
+```bash
+./node_modules/.bin/bats test/
+```
 
 ## Releasing
 
@@ -79,7 +85,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-CI validates that the tag matches the `VERSION` in the script, then creates a GitHub Release with `bin/git-stack` as a downloadable asset.
+CI creates a GitHub Release with `bin/git-stack` as a downloadable asset. The release workflow validates that the tag matches `VERSION` in the script.
 
 ## Used by
 

@@ -1,0 +1,610 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+PROG="git stack"
+
+# --- Color helpers (disabled when not a tty) ---
+
+if [[ -t 1 ]]; then
+  BOLD='\033[1m'
+  DIM='\033[2m'
+  RED='\033[31m'
+  GREEN='\033[32m'
+  YELLOW='\033[33m'
+  CYAN='\033[36m'
+  RESET='\033[0m'
+else
+  BOLD='' DIM='' RED='' GREEN='' YELLOW='' CYAN='' RESET=''
+fi
+
+# --- Utility ---
+
+die() { printf "${RED}error:${RESET} %s\n" "$*" >&2; exit 1; }
+warn() { printf "${YELLOW}warn:${RESET} %s\n" "$*" >&2; }
+info() { printf "${CYAN}•${RESET} %s\n" "$*"; }
+
+require_git_repo() {
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
+}
+
+require_not_detached() {
+  local branch
+  branch=$(git symbolic-ref --short HEAD 2>/dev/null) || die "HEAD is detached — checkout a branch first"
+  echo "$branch"
+}
+
+# --- Git config helpers ---
+
+current_branch() {
+  git symbolic-ref --short HEAD 2>/dev/null || die "HEAD is detached"
+}
+
+trunk_branch() {
+  if git show-ref --verify --quiet refs/heads/main 2>/dev/null; then
+    echo "main"
+  elif git show-ref --verify --quiet refs/heads/master 2>/dev/null; then
+    echo "master"
+  else
+    die "could not detect trunk branch (no main or master)"
+  fi
+}
+
+get_stack_parent() {
+  git config --get "branch.$1.stack-parent" 2>/dev/null || true
+}
+
+set_stack_parent() {
+  local branch="$1" parent="$2"
+  git config "branch.$branch.stack-parent" "$parent"
+  git config "branch.$branch.gh-merge-base" "$parent"
+}
+
+unset_stack_parent() {
+  git config --unset "branch.$1.stack-parent" 2>/dev/null || true
+  git config --unset "branch.$1.gh-merge-base" 2>/dev/null || true
+}
+
+# --- Stack traversal ---
+
+walk_to_root() {
+  local branch="$1"
+  local path=""
+  local visited=":"
+  local current="$branch"
+
+  while true; do
+    case "$visited" in
+      *":$current:"*) die "cycle detected in stack metadata at branch '$current'" ;;
+    esac
+    visited="${visited}${current}:"
+    local parent
+    parent=$(get_stack_parent "$current")
+    if [[ -z "$parent" ]]; then
+      break
+    fi
+    if [[ -n "$path" ]]; then
+      path="$current|$path"
+    else
+      path="$current"
+    fi
+    current="$parent"
+  done
+
+  echo "$current"
+  if [[ -n "$path" ]]; then
+    echo "$path" | tr '|' '\n'
+  fi
+}
+
+find_children() {
+  local parent="$1"
+  git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r b; do
+    local p
+    p=$(get_stack_parent "$b")
+    if [[ "$p" == "$parent" ]]; then
+      echo "$b"
+    fi
+  done
+}
+
+# DFS from a branch, collecting all descendants in depth-first order.
+# Output: one branch per line, depth-first (parent before children).
+walk_descendants() {
+  local branch="$1"
+  local children
+  children=$(find_children "$branch")
+  local child
+  while IFS= read -r child; do
+    [[ -z "$child" ]] && continue
+    echo "$child"
+    walk_descendants "$child"
+  done <<< "$children"
+}
+
+# Get the full stack as an ordered list: root, then all descendants depth-first.
+# Starts from current branch, walks to root, then DFS from root.
+full_stack() {
+  local current
+  current=$(current_branch)
+  local root_path
+  root_path=$(walk_to_root "$current")
+  local root
+  root=$(echo "$root_path" | head -1)
+
+  echo "$root"
+  walk_descendants "$root"
+}
+
+# Get the stack from root to the current branch only (for submit).
+stack_to_current() {
+  local current
+  current=$(current_branch)
+  walk_to_root "$current"
+}
+
+# --- Slugify ---
+
+slugify() {
+  echo "$*" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | cut -c1-60
+}
+
+# --- Commands ---
+
+cmd_create() {
+  require_git_repo
+  local branch_name="" commit_msg="" do_commit=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -m) shift; commit_msg="${1:-}"; do_commit=true; shift ;;
+      -h|--help) echo "Usage: $PROG create [<branch-name>] [-m \"message\"]"; exit 0 ;;
+      -*) die "unknown flag: $1" ;;
+      *) branch_name="$1"; shift ;;
+    esac
+  done
+
+  local parent
+  parent=$(require_not_detached)
+
+  if [[ -z "$branch_name" && -z "$commit_msg" ]]; then
+    die "provide a branch name or -m \"commit message\" to auto-derive one"
+  fi
+
+  if [[ -z "$branch_name" ]]; then
+    branch_name=$(slugify "$commit_msg")
+    [[ -z "$branch_name" ]] && die "could not derive branch name from message"
+  fi
+
+  # Verify branch doesn't exist
+  if git show-ref --verify --quiet "refs/heads/$branch_name" 2>/dev/null; then
+    die "branch '$branch_name' already exists"
+  fi
+
+  git checkout -b "$branch_name" >/dev/null 2>&1
+  set_stack_parent "$branch_name" "$parent"
+
+  if [[ "$do_commit" == true && -n "$commit_msg" ]]; then
+    if ! git diff --cached --quiet 2>/dev/null; then
+      git commit -m "$commit_msg" >/dev/null
+      info "committed: $commit_msg"
+    else
+      warn "no staged changes — branch created but nothing committed"
+    fi
+  fi
+
+  info "created ${BOLD}$branch_name${RESET} stacked on ${BOLD}$parent${RESET}"
+}
+
+cmd_log() {
+  require_git_repo
+  local current
+  current=$(current_branch)
+
+  # Build the stack into a newline-separated string
+  local stack_lines
+  stack_lines=$(full_stack)
+  local stack_count
+  stack_count=$(echo "$stack_lines" | grep -c . || true)
+
+  if [[ "$stack_count" -le 1 ]]; then
+    info "no stack — on ${BOLD}$current${RESET}"
+    return 0
+  fi
+
+  # Fetch PR info in one call (may fail if no remote/no gh auth — that's fine)
+  local pr_json=""
+  if command -v gh >/dev/null 2>&1; then
+    pr_json=$(gh pr list --state all --json number,headRefName,state,title,url --limit 50 2>/dev/null || true)
+  fi
+
+  local root
+  root=$(echo "$stack_lines" | head -1)
+  printf "${BOLD}%s${RESET}\n" "$root"
+
+  echo "$stack_lines" | tail -n +2 | while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+
+    # Calculate depth by walking parent chain to root
+    local d=0 b="$branch"
+    while [[ -n "$b" && "$b" != "$root" ]]; do
+      b=$(get_stack_parent "$b")
+      d=$((d + 1))
+    done
+
+    local indent=""
+    local j=0
+    while [[ $j -lt $d ]]; do
+      indent="${indent}    "
+      j=$((j + 1))
+    done
+
+    # PR info
+    local suffix=""
+    if [[ -n "$pr_json" ]]; then
+      local pr_entry
+      pr_entry=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$branch\"[^}]*}" 2>/dev/null | head -1 || true)
+      if [[ -n "$pr_entry" ]]; then
+        local num state
+        num=$(echo "$pr_entry" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
+        state=$(echo "$pr_entry" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' | head -1)
+        case "$state" in
+          MERGED) suffix=" ${DIM}(#$num)${RESET} ${GREEN}✓${RESET}" ;;
+          OPEN)   suffix=" ${DIM}(#$num)${RESET} ${CYAN}○${RESET}" ;;
+          CLOSED) suffix=" ${DIM}(#$num)${RESET} ${RED}✗${RESET}" ;;
+        esac
+      fi
+    fi
+
+    local marker=""
+    if [[ "$branch" == "$current" ]]; then
+      marker=" ${YELLOW}← you are here${RESET}"
+      suffix="${suffix/○/●}"
+    fi
+
+    printf "${indent}└─ ${BOLD}%s${RESET}%b%b\n" "$branch" "$suffix" "$marker"
+  done
+}
+
+cmd_submit() {
+  require_git_repo
+  local current
+  current=$(current_branch)
+
+  # Get stack from root to current
+  local stack_lines
+  stack_lines=$(stack_to_current)
+  local stack_count
+  stack_count=$(echo "$stack_lines" | grep -c . || true)
+
+  if [[ "$stack_count" -le 1 ]]; then
+    die "no stack to submit — current branch has no stack-parent"
+  fi
+
+  # Verify gh is available
+  command -v gh >/dev/null 2>&1 || die "'gh' CLI not found — install it or use the bare git fallback"
+
+  # Fetch existing PRs
+  local pr_json
+  pr_json=$(gh pr list --state open --json number,headRefName,baseRefName --limit 50 2>/dev/null) || die "failed to query PRs — check 'gh auth status'"
+
+  # Process each branch in stack (skip root/trunk)
+  local prev_branch=""
+  local pushed=0
+  echo "$stack_lines" | while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+
+    if [[ -z "$prev_branch" ]]; then
+      prev_branch="$branch"
+      continue
+    fi
+
+    local parent="$prev_branch"
+
+    info "pushing ${BOLD}$branch${RESET}..."
+    git push --force-with-lease origin "$branch" 2>/dev/null || git push -u origin "$branch" 2>/dev/null || die "failed to push $branch"
+
+    # Check for existing PR
+    local existing_pr
+    existing_pr=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$branch\"[^}]*}" 2>/dev/null | head -1 || true)
+
+    if [[ -z "$existing_pr" ]]; then
+      info "creating PR for ${BOLD}$branch${RESET} → ${parent}..."
+      gh pr create --head "$branch" --base "$parent" --fill 2>/dev/null || die "failed to create PR for $branch"
+    else
+      # Check if base needs updating
+      local current_base
+      current_base=$(echo "$existing_pr" | sed -n 's/.*"baseRefName":"\([^"]*\)".*/\1/p' | head -1)
+      local pr_num
+      pr_num=$(echo "$existing_pr" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
+
+      if [[ "$current_base" != "$parent" ]]; then
+        info "retargeting #${pr_num} base: ${current_base} → ${parent}..."
+        gh pr edit "$pr_num" --base "$parent" 2>/dev/null || die "failed to retarget PR #$pr_num — stack is in an inconsistent state, fix manually with: gh pr edit $pr_num --base $parent"
+      else
+        info "#${pr_num} already targets ${parent} ✓"
+      fi
+    fi
+
+    prev_branch="$branch"
+  done
+
+  printf "\n${GREEN}✓${RESET} stack submitted (%d branches pushed)\n" $((stack_count - 1))
+}
+
+# --- Restack helper ---
+
+# Rebase a branch onto a new base, then recursively restack its children.
+# Args: <branch> <old_parent_tip> <new_base>
+restack_onto() {
+  local branch="$1" old_parent_tip="$2" new_base="$3"
+
+  local old_tip
+  old_tip=$(git rev-parse "$branch" 2>/dev/null) || die "failed to resolve tip of $branch"
+
+  info "restacking ${BOLD}$branch${RESET} onto ${new_base}..."
+  git checkout "$branch" 2>/dev/null || die "failed to checkout $branch"
+  git rebase --onto "$new_base" "$old_parent_tip" "$branch" 2>/dev/null || die "rebase conflict on $branch — resolve manually"
+  git push --force-with-lease origin "$branch" 2>/dev/null || die "failed to push rebased $branch"
+
+  # Recurse into children, using this branch's old tip as their rebase boundary
+  local children
+  children=$(find_children "$branch")
+  echo "$children" | while IFS= read -r child; do
+    [[ -z "$child" ]] && continue
+    restack_onto "$child" "$old_tip" "$branch"
+  done
+}
+
+# --- Retarget polling ---
+
+wait_for_retarget() {
+  local pr_number="$1" expected_base="$2" max_attempts="${3:-4}"
+  local attempt=0 delay=2
+
+  while [[ $attempt -lt $max_attempts ]]; do
+    local actual_base
+    actual_base=$(gh pr view "$pr_number" --json baseRefName --jq .baseRefName 2>/dev/null || true)
+    if [[ "$actual_base" == "$expected_base" ]]; then
+      return 0
+    fi
+    sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+# --- Merge ---
+
+cmd_merge() {
+  require_git_repo
+
+  local strategy="merge" merge_all=false dry_run=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --merge)   strategy="merge"; shift ;;
+      --rebase)  strategy="rebase"; shift ;;
+      --squash)  strategy="squash"; shift ;;
+      --all)     merge_all=true; shift ;;
+      --dry-run) dry_run=true; shift ;;
+      -h|--help) echo "Usage: $PROG merge [--all] [--rebase|--squash] [--dry-run]"; exit 0 ;;
+      *)         die "unknown flag: $1" ;;
+    esac
+  done
+
+  command -v gh >/dev/null 2>&1 || die "'gh' CLI not found"
+
+  local trunk
+  trunk=$(trunk_branch)
+
+  # Build stack from root to current branch
+  local stack_lines
+  stack_lines=$(stack_to_current)
+  local stack_count
+  stack_count=$(echo "$stack_lines" | grep -c . || true)
+
+  if [[ "$stack_count" -le 1 ]]; then
+    die "no stack to merge — current branch has no stack-parent"
+  fi
+
+  # Get open PRs
+  local pr_json
+  pr_json=$(gh pr list --state open --json number,headRefName,baseRefName --limit 50 2>/dev/null) || die "failed to query PRs — check 'gh auth status'"
+
+  # Build ordered list of branches to merge (skip trunk)
+  local branches_to_merge=""
+  echo "$stack_lines" | tail -n +2 | while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+    local pr_entry
+    pr_entry=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$branch\"[^}]*}" 2>/dev/null | head -1 || true)
+    if [[ -n "$pr_entry" ]]; then
+      local pr_num
+      pr_num=$(echo "$pr_entry" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
+      echo "$branch:$pr_num"
+    fi
+  done > /tmp/git-stack-merge-$$
+
+  local merge_list
+  merge_list=$(cat /tmp/git-stack-merge-$$ 2>/dev/null || true)
+  rm -f /tmp/git-stack-merge-$$
+
+  if [[ -z "$merge_list" ]]; then
+    die "no open PRs found in the stack"
+  fi
+
+  if [[ "$merge_all" != true ]]; then
+    merge_list=$(echo "$merge_list" | head -1)
+  fi
+
+  local merge_count
+  merge_count=$(echo "$merge_list" | grep -c . || true)
+
+  # Dry run
+  if [[ "$dry_run" == true ]]; then
+    printf "${BOLD}Dry run${RESET} — would merge %d PR(s) using %s strategy:\n\n" "$merge_count" "$strategy"
+    echo "$merge_list" | while IFS=: read -r branch pr_num; do
+      info "#${pr_num} (${branch}) — $strategy"
+    done
+    return 0
+  fi
+
+  local original_branch
+  original_branch=$(current_branch)
+
+  # Snapshot original branch tips before any rewrites (needed for --onto rebase boundaries)
+  local tip_snapshot=""
+  echo "$merge_list" | while IFS=: read -r b _; do
+    [[ -z "$b" ]] && continue
+    local sha
+    sha=$(git rev-parse "$b" 2>/dev/null || echo "unknown")
+    echo "$b:$sha"
+  done > /tmp/git-stack-tips-$$
+  tip_snapshot=$(cat /tmp/git-stack-tips-$$ 2>/dev/null || true)
+  rm -f /tmp/git-stack-tips-$$
+
+  # Merge each PR bottom-up
+  local merged=0
+  local remaining_list="$merge_list"
+
+  echo "$merge_list" | while IFS=: read -r branch pr_num; do
+    [[ -z "$branch" ]] && continue
+
+    # Find child PR (the next line in remaining_list, or check for children)
+    local child_branch="" child_pr=""
+    local next_in_stack
+    next_in_stack=$(echo "$remaining_list" | grep -A1 "^$branch:" | tail -1)
+    if [[ "$next_in_stack" != "$branch:$pr_num" && -n "$next_in_stack" ]]; then
+      child_branch=$(echo "$next_in_stack" | cut -d: -f1)
+      child_pr=$(echo "$next_in_stack" | cut -d: -f2)
+    else
+      # Check if there's a child PR not in merge list
+      local child_b
+      child_b=$(find_children "$branch" | head -1)
+      if [[ -n "$child_b" ]]; then
+        local child_entry
+        child_entry=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$child_b\"[^}]*}" 2>/dev/null | head -1 || true)
+        if [[ -n "$child_entry" ]]; then
+          child_branch="$child_b"
+          child_pr=$(echo "$child_entry" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
+        fi
+      fi
+    fi
+
+    if [[ "$strategy" == "merge" ]]; then
+      info "merging #${pr_num} (${BOLD}$branch${RESET}) with merge commit..."
+      gh pr merge "$pr_num" --merge 2>/dev/null || die "failed to merge PR #$pr_num"
+    else
+      # Rebase or squash strategy
+      # Look up the ORIGINAL tip from pre-loop snapshot (not current, which may have been rewritten)
+      local parent_tip
+      parent_tip=$(echo "$tip_snapshot" | grep "^$branch:" | head -1 | cut -d: -f2)
+      if [[ -z "$parent_tip" || "$parent_tip" == "unknown" ]]; then
+        parent_tip=$(git rev-parse "$branch" 2>/dev/null) || die "failed to resolve tip of $branch"
+      fi
+
+      info "retargeting #${pr_num} to ${trunk}..."
+      gh pr edit "$pr_num" --base "$trunk" 2>/dev/null || die "failed to retarget PR #$pr_num to $trunk"
+
+      info "rebasing ${BOLD}$branch${RESET} onto ${trunk}..."
+      git fetch origin "$trunk" 2>/dev/null || die "failed to fetch $trunk"
+      git checkout "$branch" 2>/dev/null || die "failed to checkout $branch"
+
+      # Use --onto with the previous branch's original tip to replay ONLY this
+      # branch's unique commits (avoids replaying already-merged parent commits)
+      local prev_in_list
+      prev_in_list=$(echo "$merge_list" | grep -B1 "^${branch}:" | head -1 | cut -d: -f1)
+      if [[ "$prev_in_list" != "$branch" && -n "$prev_in_list" ]]; then
+        local onto_boundary
+        onto_boundary=$(echo "$tip_snapshot" | grep "^${prev_in_list}:" | head -1 | cut -d: -f2)
+        if [[ -n "$onto_boundary" && "$onto_boundary" != "unknown" ]]; then
+          git rebase --onto "origin/$trunk" "$onto_boundary" "$branch" 2>/dev/null || die "rebase conflict — resolve manually, then re-run merge"
+        else
+          git rebase "origin/$trunk" 2>/dev/null || die "rebase conflict — resolve manually, then re-run merge"
+        fi
+      else
+        git rebase "origin/$trunk" 2>/dev/null || die "rebase conflict — resolve manually, then re-run merge"
+      fi
+      git push --force-with-lease origin "$branch" 2>/dev/null || die "failed to push rebased $branch"
+
+      local strategy_flag="--$strategy"
+      info "merging #${pr_num} (${BOLD}$branch${RESET}) with ${strategy}..."
+      gh pr merge "$pr_num" "$strategy_flag" 2>/dev/null || die "failed to merge PR #$pr_num"
+    fi
+
+    # Retarget child PR to trunk (don't rely on GitHub auto-retarget)
+    if [[ -n "$child_pr" ]]; then
+      info "retargeting #${child_pr} to ${trunk}..."
+      # Give GitHub a moment, then force retarget
+      sleep 2
+      gh pr edit "$child_pr" --base "$trunk" 2>/dev/null || die "failed to retarget PR #$child_pr to $trunk"
+      info "#${child_pr} retargeted to ${trunk} ✓"
+    fi
+
+    if [[ -n "$child_branch" ]]; then
+      set_stack_parent "$child_branch" "$trunk"
+
+      # For rebase/squash: restack child and all its descendants,
+      # but skip if child is in the merge list (the loop handles it)
+      if [[ "$strategy" != "merge" ]]; then
+        if echo "$merge_list" | grep -q "^${child_branch}:"; then
+          : # child will be rebased by the next loop iteration
+        else
+          git fetch origin "$trunk" 2>/dev/null
+          restack_onto "$child_branch" "$parent_tip" "origin/$trunk"
+        fi
+      fi
+    fi
+
+    # Clean up local metadata only (branches left for user to delete)
+    unset_stack_parent "$branch"
+
+    merged=$((merged + 1))
+  done
+
+  # Sync local state
+  git fetch --prune 2>/dev/null || true
+
+  # Return to a sensible branch
+  if git show-ref --verify --quiet "refs/heads/$original_branch" 2>/dev/null; then
+    git checkout "$original_branch" 2>/dev/null || true
+  else
+    git checkout "$trunk" 2>/dev/null || true
+  fi
+
+  printf "\n${GREEN}✓${RESET} merged %d PR(s) using %s strategy\n" "$merge_count" "$strategy"
+}
+
+# --- Usage ---
+
+usage() {
+  cat <<EOF
+${BOLD}$PROG${RESET} v$VERSION — lightweight stacked PRs with git + gh
+
+${BOLD}Usage:${RESET}
+  $PROG create [<branch-name>] [-m "message"]          Create a stacked branch
+  $PROG log                                             Show the current stack
+  $PROG submit                                          Push & create/update PRs
+  $PROG merge [--all] [--rebase|--squash] [--dry-run]   Merge PRs bottom-up
+  $PROG help                                             Show this help
+  $PROG --version                                        Show version
+
+${BOLD}Metadata:${RESET}
+  Stack parent is stored in git config (branch.<name>.stack-parent).
+  No external services, no auth required beyond 'gh auth login'.
+EOF
+  exit 0
+}
+
+# --- Dispatcher ---
+
+case "${1:-}" in
+  create)    shift; cmd_create "$@" ;;
+  log|ls)    shift; cmd_log "$@" ;;
+  submit|push) shift; cmd_submit "$@" ;;
+  merge)     shift; cmd_merge "$@" ;;
+  -h|--help|help|"") usage ;;
+  -v|--version) echo "$PROG v$VERSION" ;;
+  *)         die "unknown command: $1 — run '$PROG help' for usage" ;;
+esac

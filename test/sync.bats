@@ -172,6 +172,37 @@ advance_trunk() {
   [ "$(git merge-base "$main_tip" feat-c)" = "$main_tip" ]
 }
 
+@test "sync only touches the current stack when multiple stacks exist" {
+  # Stack 1: main -> aaa-other -> aaa-child
+  create_linear_stack aaa-other aaa-child
+  # Stack 2: main -> zzz-mine -> zzz-child
+  create_stack_branch zzz-mine main
+  create_stack_branch zzz-child zzz-mine
+  git push origin aaa-other aaa-child zzz-mine zzz-child >/dev/null 2>&1
+
+  local other_tip_before
+  other_tip_before=$(git rev-parse origin/aaa-other)
+
+  advance_trunk
+  git checkout zzz-child >/dev/null 2>&1
+
+  run git-stack sync
+  assert_success
+  assert_output --partial "synced 2 branch(es)"
+
+  # Current stack should be rebased onto new main
+  local main_tip
+  main_tip=$(git rev-parse origin/main)
+  [ "$(git merge-base "$main_tip" zzz-mine)" = "$main_tip" ]
+  [ "$(git merge-base "$main_tip" zzz-child)" = "$main_tip" ]
+
+  # Other stack should NOT have been touched
+  git fetch origin aaa-other >/dev/null 2>&1
+  local other_tip_after
+  other_tip_after=$(git rev-parse origin/aaa-other)
+  [ "$other_tip_before" = "$other_tip_after" ]
+}
+
 @test "sync works when run from middle of stack" {
   create_linear_stack feat-a feat-b feat-c
   git push origin feat-a feat-b feat-c >/dev/null 2>&1

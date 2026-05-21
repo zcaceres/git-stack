@@ -384,17 +384,17 @@ cmd_sync() {
 
   git remote get-url origin >/dev/null 2>&1 || die "no 'origin' remote configured"
 
-  local stack_lines
-  stack_lines=$(full_stack)
+  local lineage
+  lineage=$(stack_to_current)
   local root
-  root=$(echo "$stack_lines" | head -1)
+  root=$(echo "$lineage" | head -1)
 
   if [[ "$root" != "$trunk" ]]; then
     die "stack root '${root}' is not trunk '${trunk}' — cannot sync"
   fi
 
   local bottom_branch
-  bottom_branch=$(echo "$stack_lines" | sed -n '2p')
+  bottom_branch=$(echo "$lineage" | sed -n '2p')
 
   if [[ -z "$bottom_branch" ]]; then
     die "no stack to sync — current branch has no stacked children"
@@ -426,8 +426,12 @@ cmd_sync() {
 
   git checkout "$original_branch" 2>/dev/null || warn "could not return to $original_branch"
 
-  local branch_count
-  branch_count=$(echo "$stack_lines" | tail -n +2 | grep -c . || true)
+  local branch_count descendants
+  descendants=$(walk_descendants "$bottom_branch")
+  branch_count=1
+  if [[ -n "$descendants" ]]; then
+    branch_count=$(( 1 + $(echo "$descendants" | grep -c .) ))
+  fi
   printf "\n${GREEN}✓${RESET} synced %d branch(es) onto origin/%s\n" "$branch_count" "$trunk"
 }
 

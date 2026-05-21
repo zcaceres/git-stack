@@ -30,9 +30,16 @@ git stack create [<branch-name>] [-m "message"]          Create a stacked branch
 git stack log                                             Show the current stack
 git stack submit                                          Push & create/update PRs
 git stack merge [--all] [--rebase|--squash] [--dry-run]   Merge PRs bottom-up
+git stack sync [--no-push]                                Sync stack onto updated trunk
 git stack help                                            Show help
 git stack --version                                       Show version
 ```
+
+### Syncing a stack
+
+`git stack sync` rebases the current stack onto the latest trunk (e.g., after a separate PR merges into `main`). It uses `git rebase --onto` internally, so each branch replays only its own unique commits — no redundant conflicts from ancestor commits being replayed at every layer.
+
+Add `--no-push` to rebase locally without force-pushing.
 
 ### Merging a stack
 
@@ -81,8 +88,8 @@ To run tests manually:
 3. Tag and push:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 CI creates a GitHub Release with `bin/git-stack` as a downloadable asset. The release workflow validates that the tag matches `VERSION` in the script.

@@ -3,6 +3,7 @@ set -euo pipefail
 
 VERSION="0.1.0"
 PROG="git stack"
+_RESTACK_PUSH=true
 
 # --- Color helpers (disabled when not a tty) ---
 
@@ -345,7 +346,9 @@ restack_onto() {
   info "restacking ${BOLD}$branch${RESET} onto ${new_base}..."
   git checkout "$branch" 2>/dev/null || die "failed to checkout $branch"
   git rebase --onto "$new_base" "$old_parent_tip" "$branch" 2>/dev/null || die "rebase conflict on $branch — resolve manually"
-  git push --force-with-lease origin "$branch" 2>/dev/null || die "failed to push rebased $branch"
+  if [[ "$_RESTACK_PUSH" == true ]]; then
+    git push --force-with-lease origin "$branch" 2>/dev/null || die "failed to push rebased $branch"
+  fi
 
   # Recurse into children, using this branch's old tip as their rebase boundary
   local children
@@ -354,6 +357,78 @@ restack_onto() {
     [[ -z "$child" ]] && continue
     restack_onto "$child" "$old_tip" "$branch"
   done
+}
+
+# --- Sync ---
+
+cmd_sync() {
+  require_git_repo
+  local original_branch
+  original_branch=$(require_not_detached)
+
+  git diff-index --quiet HEAD -- 2>/dev/null || die "working tree is dirty — commit or stash changes first"
+
+  local do_push=true
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-push) do_push=false; shift ;;
+      -h|--help) echo "Usage: $PROG sync [--no-push]"; exit 0 ;;
+      -*) die "unknown flag: $1" ;;
+      *) die "unexpected argument: $1" ;;
+    esac
+  done
+
+  local trunk
+  trunk=$(trunk_branch)
+
+  git remote get-url origin >/dev/null 2>&1 || die "no 'origin' remote configured"
+
+  local stack_lines
+  stack_lines=$(full_stack)
+  local root
+  root=$(echo "$stack_lines" | head -1)
+
+  if [[ "$root" != "$trunk" ]]; then
+    die "stack root '${root}' is not trunk '${trunk}' — cannot sync"
+  fi
+
+  local bottom_branch
+  bottom_branch=$(echo "$stack_lines" | sed -n '2p')
+
+  if [[ -z "$bottom_branch" ]]; then
+    die "no stack to sync — current branch has no stacked children"
+  fi
+
+  local old_trunk_tip
+  old_trunk_tip=$(git rev-parse "origin/$trunk" 2>/dev/null) || die "could not resolve origin/$trunk — have you fetched at least once?"
+
+  info "fetching origin/${trunk}..."
+  git fetch origin "$trunk" 2>/dev/null || die "failed to fetch origin/$trunk"
+
+  local new_trunk_tip
+  new_trunk_tip=$(git rev-parse "origin/$trunk" 2>/dev/null)
+
+  if [[ "$old_trunk_tip" == "$new_trunk_tip" ]]; then
+    info "origin/${trunk} is already up to date — nothing to sync"
+    return 0
+  fi
+
+  info "origin/${trunk} advanced: ${old_trunk_tip:0:8}..${new_trunk_tip:0:8}"
+
+  if [[ "$do_push" == false ]]; then
+    _RESTACK_PUSH=false
+  fi
+
+  restack_onto "$bottom_branch" "$old_trunk_tip" "origin/$trunk"
+
+  _RESTACK_PUSH=true
+
+  git checkout "$original_branch" 2>/dev/null || warn "could not return to $original_branch"
+
+  local branch_count
+  branch_count=$(echo "$stack_lines" | tail -n +2 | grep -c . || true)
+  printf "\n${GREEN}✓${RESET} synced %d branch(es) onto origin/%s\n" "$branch_count" "$trunk"
 }
 
 # --- Retarget polling ---
@@ -587,6 +662,7 @@ ${BOLD}Usage:${RESET}
   $PROG log                                             Show the current stack
   $PROG submit                                          Push & create/update PRs
   $PROG merge [--all] [--rebase|--squash] [--dry-run]   Merge PRs bottom-up
+  $PROG sync [--no-push]                                 Sync stack onto updated trunk
   $PROG help                                             Show this help
   $PROG --version                                        Show version
 
@@ -604,6 +680,7 @@ case "${1:-}" in
   log|ls)    shift; cmd_log "$@" ;;
   submit|push) shift; cmd_submit "$@" ;;
   merge)     shift; cmd_merge "$@" ;;
+  sync)      shift; cmd_sync "$@" ;;
   -h|--help|help|"") usage ;;
   -v|--version) echo "$PROG v$VERSION" ;;
   *)         die "unknown command: $1 — run '$PROG help' for usage" ;;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 PROG="git stack"
 _RESTACK_PUSH=true
 
@@ -400,27 +400,36 @@ cmd_sync() {
     die "no stack to sync — current branch has no stacked children"
   fi
 
-  local old_trunk_tip
-  old_trunk_tip=$(git rev-parse "origin/$trunk" 2>/dev/null) || die "could not resolve origin/$trunk — have you fetched at least once?"
+  git rev-parse "origin/$trunk" >/dev/null 2>&1 || die "could not resolve origin/$trunk — have you fetched at least once?"
 
   info "fetching origin/${trunk}..."
   git fetch origin "$trunk" 2>/dev/null || die "failed to fetch origin/$trunk"
 
-  local new_trunk_tip
-  new_trunk_tip=$(git rev-parse "origin/$trunk" 2>/dev/null)
+  local trunk_tip
+  trunk_tip=$(git rev-parse "origin/$trunk" 2>/dev/null)
 
-  if [[ "$old_trunk_tip" == "$new_trunk_tip" ]]; then
-    info "origin/${trunk} is already up to date — nothing to sync"
+  # The commit the stack currently forks from trunk at. This is both the rebase
+  # boundary AND the basis for "is there anything to sync?". Derive it from the
+  # stack's actual divergence point, NOT from how far origin/trunk moved during
+  # *this* fetch — any prior `git fetch` (every status check runs one) would
+  # leave the pre/post-fetch tips equal and wrongly short-circuit to "nothing to
+  # sync" while the stack is still behind trunk.
+  local fork_point
+  fork_point=$(git merge-base "$bottom_branch" "origin/$trunk" 2>/dev/null) \
+    || die "could not find merge-base of $bottom_branch and origin/$trunk"
+
+  if [[ "$fork_point" == "$trunk_tip" ]]; then
+    info "stack already based on origin/${trunk} (${trunk_tip:0:8}) — nothing to sync"
     return 0
   fi
 
-  info "origin/${trunk} advanced: ${old_trunk_tip:0:8}..${new_trunk_tip:0:8}"
+  info "rebasing stack onto origin/${trunk}: ${fork_point:0:8}..${trunk_tip:0:8}"
 
   if [[ "$do_push" == false ]]; then
     _RESTACK_PUSH=false
   fi
 
-  restack_onto "$bottom_branch" "$old_trunk_tip" "origin/$trunk"
+  restack_onto "$bottom_branch" "$fork_point" "origin/$trunk"
 
   _RESTACK_PUSH=true
 

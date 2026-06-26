@@ -80,7 +80,34 @@ advance_trunk() {
 
   run git-stack sync
   assert_success
-  assert_output --partial "already up to date"
+  assert_output --partial "nothing to sync"
+}
+
+# Regression: sync must decide whether to rebase from the stack's fork point,
+# not from whether its OWN fetch advanced origin/main. A prior fetch (every
+# status check runs one) leaves sync's pre/post-fetch tips equal; the old gate
+# then printed "nothing to sync" and left the stack stranded behind trunk.
+@test "sync rebases when origin/main was already fetched before sync runs" {
+  create_linear_stack feat-a feat-b
+  git push origin feat-a feat-b >/dev/null 2>&1
+  advance_trunk
+
+  # Simulate a prior status check that already advanced the local origin/main
+  # tracking ref, so sync's own fetch observes no movement.
+  git fetch origin main >/dev/null 2>&1
+
+  git checkout feat-b >/dev/null 2>&1
+
+  run git-stack sync
+  assert_success
+  assert_output --partial "synced 2 branch(es)"
+  refute_output --partial "nothing to sync"
+
+  # Both branches must end up based on the new main tip.
+  local main_tip
+  main_tip=$(git rev-parse origin/main)
+  [ "$(git merge-base "$main_tip" feat-a)" = "$main_tip" ]
+  [ "$(git merge-base "$main_tip" feat-b)" = "$main_tip" ]
 }
 
 @test "sync handles 3-branch stack without commit duplication" {

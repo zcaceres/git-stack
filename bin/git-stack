@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.1"
+VERSION="0.3.0"
 PROG="git stack"
 _RESTACK_PUSH=true
 
@@ -269,6 +269,19 @@ cmd_log() {
 
 cmd_submit() {
   require_git_repo
+
+  local draft=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft)   draft=true; shift ;;
+      -h|--help) echo "Usage: $PROG submit [--draft]"; exit 0 ;;
+      -*) die "unknown flag: $1" ;;
+      *) die "unexpected argument: $1" ;;
+    esac
+  done
+  local draft_flag="" draft_label=""
+  [[ "$draft" == true ]] && { draft_flag="--draft"; draft_label="draft "; }
+
   local current
   current=$(current_branch)
 
@@ -310,8 +323,8 @@ cmd_submit() {
     existing_pr=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$branch\"[^}]*}" 2>/dev/null | head -1 || true)
 
     if [[ -z "$existing_pr" ]]; then
-      info "creating PR for ${BOLD}$branch${RESET} → ${parent}..."
-      gh pr create --head "$branch" --base "$parent" --fill 2>/dev/null || die "failed to create PR for $branch"
+      info "creating ${draft_label}PR for ${BOLD}$branch${RESET} → ${parent}..."
+      gh pr create --head "$branch" --base "$parent" --fill $draft_flag 2>/dev/null || die "failed to create PR for $branch"
     else
       # Check if base needs updating
       local current_base
@@ -673,7 +686,7 @@ ${BOLD}$PROG${RESET} v$VERSION — lightweight stacked PRs with git + gh
 ${BOLD}Usage:${RESET}
   $PROG create [<branch-name>] [-m "message"]          Create a stacked branch
   $PROG log                                             Show the current stack
-  $PROG submit                                          Push & create/update PRs
+  $PROG submit [--draft]                                Push & create/update PRs
   $PROG merge [--all] [--rebase|--squash] [--dry-run]   Merge PRs bottom-up
   $PROG sync [--no-push]                                 Sync stack onto updated trunk
   $PROG help                                             Show this help

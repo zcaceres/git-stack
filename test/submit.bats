@@ -78,6 +78,40 @@ teardown() {
   assert_output --partial "'gh' CLI not found"
 }
 
+@test "submit --draft creates draft PRs" {
+  create_linear_stack feat-a feat-b
+  git push origin feat-a feat-b >/dev/null 2>&1 || true
+  mock_gh_with_prs '[]'
+
+  run git-stack submit --draft
+  assert_success
+
+  assert_gh_called "pr create --head feat-a --base main --fill --draft"
+  assert_gh_called "pr create --head feat-b --base feat-a --fill --draft"
+}
+
+@test "submit does not create draft PRs by default" {
+  create_linear_stack feat-a
+  git push origin feat-a >/dev/null 2>&1 || true
+  mock_gh_with_prs '[]'
+
+  run git-stack submit
+  assert_success
+
+  assert_gh_called "pr create --head feat-a --base main"
+  refute_gh_called "--draft"
+}
+
+@test "submit rejects unknown flags" {
+  create_linear_stack feat-a
+  git push origin feat-a >/dev/null 2>&1 || true
+  mock_gh_with_prs '[]'
+
+  run git-stack submit --bogus
+  assert_failure
+  assert_output --partial "unknown flag"
+}
+
 @test "submit push alias works" {
   create_linear_stack feat-a
   git push origin feat-a >/dev/null 2>&1 || true

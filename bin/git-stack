@@ -165,7 +165,7 @@ cmd_create() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -m) shift; [[ $# -gt 0 ]] || die "-m requires a commit message"; commit_msg="$1"; do_commit=true; shift ;;
+      -m) shift; [[ -n "${1:-}" ]] || die "-m requires a commit message"; commit_msg="$1"; do_commit=true; shift ;;
       -h|--help) echo "Usage: $PROG create [<branch-name>] [-m \"message\"]"; exit 0 ;;
       -*) die "unknown flag: $1" ;;
       *) branch_name="$1"; shift ;;

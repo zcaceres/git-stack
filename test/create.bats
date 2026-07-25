@@ -95,6 +95,22 @@ teardown() {
   [ "$(current_branch)" = "main" ]
 }
 
+@test "create fails when -m is given an empty message" {
+  # An empty message previously passed the arity check, set do_commit=true,
+  # then silently skipped the commit block — branch created, staged changes
+  # left behind, exit 0, no warning.
+  echo "work" > work.txt
+  git add work.txt
+
+  run git-stack create foo -m ""
+  assert_failure
+  assert_output --partial "-m requires a commit message"
+
+  [ "$(current_branch)" = "main" ]
+  run git show-ref --verify --quiet refs/heads/foo
+  assert_failure
+}
+
 @test "create rejects an invalid branch name" {
   run git-stack create "foo..bar"
   assert_failure

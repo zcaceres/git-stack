@@ -56,10 +56,68 @@ teardown() {
   assert_output --partial "no staged changes"
 }
 
+@test "create with multi-line -m derives branch name from subject line" {
+  echo "new content" > new.txt
+  git add new.txt
+
+  run git-stack create -m "$(printf 'fix: title line\n\nbody paragraph here.\n')"
+  assert_success
+
+  [ "$(current_branch)" = "fix-title-line" ]
+  [ "$(get_stack_parent fix-title-line)" = "main" ]
+
+  # Full message, body included, reaches the commit.
+  [ "$(git log -1 --pretty=%s)" = "fix: title line" ]
+  [ "$(git log -1 --pretty=%b)" = "body paragraph here." ]
+}
+
+@test "create with multi-line -m reports only the subject" {
+  echo "new content" > new.txt
+  git add new.txt
+
+  run git-stack create -m "$(printf 'fix: title line\n\nbody paragraph here.\n')"
+  assert_success
+  assert_output --partial "committed: fix: title line"
+  refute_output --partial "body paragraph here."
+}
+
 @test "create fails with no arguments" {
   run git-stack create
   assert_failure
   assert_output --partial "provide a branch name or -m"
+}
+
+@test "create fails when -m is given no message" {
+  run git-stack create -m
+  assert_failure
+  assert_output --partial "-m requires a commit message"
+
+  [ "$(current_branch)" = "main" ]
+}
+
+@test "create rejects an invalid branch name" {
+  run git-stack create "foo..bar"
+  assert_failure
+  assert_output --partial "invalid branch name"
+
+  [ "$(current_branch)" = "main" ]
+  [ -z "$(get_stack_parent 'foo..bar')" ]
+}
+
+@test "create surfaces git's error when the branch cannot be created" {
+  # 'feat' is a valid ref name, but refs/heads/feat/a already occupies the
+  # directory, so git refuses to create refs/heads/feat.
+  git branch feat/a >/dev/null 2>&1
+
+  run git-stack create feat
+  assert_failure
+  assert_output --partial "could not create branch 'feat'"
+  # Assert on the backend-neutral tail: the files ref backend prefixes this
+  # with "cannot lock ref '<ref>': "; the reftable backend does not.
+  assert_output --partial "exists; cannot create 'refs/heads/feat'"
+
+  [ "$(current_branch)" = "main" ]
+  [ -z "$(get_stack_parent feat)" ]
 }
 
 @test "create fails if branch already exists" {

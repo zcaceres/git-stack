@@ -7,6 +7,11 @@ load "$PROJECT_ROOT/node_modules/bats-support/load.bash"
 load "$PROJECT_ROOT/node_modules/bats-assert/load.bash"
 
 setup() {
+  # Git exports GIT_DIR and friends to its hooks, so running these tests
+  # from .githooks/pre-push would point every fixture's git commands at the
+  # real repo. Clear them before building any fixture.
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+
   TEST_TMPDIR="$(mktemp -d)"
   export HOME="$TEST_TMPDIR"
   export GIT_CONFIG_NOSYSTEM=1

@@ -72,6 +72,15 @@ setup_bare_origin() {
   git push -u origin main >/dev/null 2>&1
 }
 
+# Shadow sleep so retry/backoff paths don't actually wait.
+mock_sleep() {
+  cat > "$TEST_TMPDIR/mock-bin/sleep" <<'SLEEP_EOF'
+#!/usr/bin/env bash
+exit 0
+SLEEP_EOF
+  chmod +x "$TEST_TMPDIR/mock-bin/sleep"
+}
+
 # Write a custom gh mock script.
 # Usage: mock_gh "body of script"
 # The body is written literally (no expansion).

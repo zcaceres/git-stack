@@ -331,6 +331,7 @@ setup_stack_with_prs() {
 @test "merge dies when gh pr merge fails" {
   create_linear_stack feat-a
   git push origin feat-a >/dev/null 2>&1
+  mock_sleep
 
   mock_gh '
 case "$1:$2" in
@@ -347,6 +348,91 @@ esac'
   run git-stack merge
   assert_failure
   assert_output --partial "failed to merge PR"
+}
+
+@test "merge retries while GitHub's mergeability is still settling" {
+  create_linear_stack feat-a
+  git push origin feat-a >/dev/null 2>&1
+  mock_sleep
+
+  # Reject the first merge the way GitHub does right after a force-push,
+  # then accept the second.
+  mock_gh '
+case "$1:$2" in
+  pr:list)
+    echo '"'"'[{"number":1,"headRefName":"feat-a","baseRefName":"main"}]'"'"'
+    ;;
+  pr:merge)
+    attempts=$(cat "$HOME/merge-attempts" 2>/dev/null || echo 0)
+    attempts=$((attempts + 1))
+    echo "$attempts" > "$HOME/merge-attempts"
+    if [ "$attempts" -lt 2 ]; then
+      echo "Base branch was modified. Review and try the merge again." >&2
+      exit 1
+    fi
+    ;;
+  pr:view)
+    echo OPEN
+    ;;
+  *)
+    ;;
+esac'
+
+  run git-stack merge
+  assert_success
+  assert_output --partial "retrying"
+  [ "$(cat "$TEST_TMPDIR/merge-attempts")" = "2" ]
+}
+
+@test "merge succeeds when the PR landed despite gh reporting an error" {
+  create_linear_stack feat-a
+  git push origin feat-a >/dev/null 2>&1
+  mock_sleep
+
+  mock_gh '
+case "$1:$2" in
+  pr:list)
+    echo '"'"'[{"number":1,"headRefName":"feat-a","baseRefName":"main"}]'"'"'
+    ;;
+  pr:merge)
+    exit 1
+    ;;
+  pr:view)
+    echo MERGED
+    ;;
+  *)
+    ;;
+esac'
+
+  run git-stack merge
+  assert_success
+  refute_output --partial "failed to merge PR"
+}
+
+@test "merge surfaces gh's error instead of swallowing it" {
+  create_linear_stack feat-a
+  git push origin feat-a >/dev/null 2>&1
+  mock_sleep
+
+  mock_gh '
+case "$1:$2" in
+  pr:list)
+    echo '"'"'[{"number":1,"headRefName":"feat-a","baseRefName":"main"}]'"'"'
+    ;;
+  pr:merge)
+    echo "GraphQL: Pull request is not mergeable" >&2
+    exit 1
+    ;;
+  pr:view)
+    echo OPEN
+    ;;
+  *)
+    ;;
+esac'
+
+  run git-stack merge
+  assert_failure
+  assert_output --partial "GraphQL: Pull request is not mergeable"
 }
 
 @test "rebase merge dies on rebase conflict" {

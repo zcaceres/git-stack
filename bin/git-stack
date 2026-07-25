@@ -489,6 +489,34 @@ wait_for_retarget() {
   return 1
 }
 
+# GitHub recomputes mergeability asynchronously, so a merge issued right after
+# retargeting and force-pushing a branch can be rejected while the PR is still
+# settling. Retry with backoff, re-checking whether the PR landed anyway, and
+# surface gh's own error if it never succeeds.
+merge_pr_with_retry() {
+  local pr_number="$1" strategy_flag="$2" max_attempts="${3:-4}"
+  local attempt=0 delay=2 err=""
+
+  while true; do
+    if err=$(gh pr merge "$pr_number" "$strategy_flag" 2>&1 >/dev/null); then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+
+    # The merge may have landed even though gh reported an error.
+    local state
+    state=$(gh pr view "$pr_number" --json state --jq .state 2>/dev/null || true)
+    [[ "$state" == "MERGED" ]] && return 0
+
+    [[ $attempt -ge $max_attempts ]] && break
+    warn "merge of #$pr_number not accepted yet, retrying in ${delay}s..."
+    sleep "$delay"
+    delay=$((delay * 2))
+  done
+
+  die "failed to merge PR #$pr_number after $max_attempts attempt(s): $err"
+}
+
 # --- Merge ---
 
 cmd_merge() {
@@ -608,7 +636,7 @@ cmd_merge() {
 
     if [[ "$strategy" == "merge" ]]; then
       info "merging #${pr_num} (${BOLD}$branch${RESET}) with merge commit..."
-      gh pr merge "$pr_num" --merge 2>/dev/null || die "failed to merge PR #$pr_num"
+      merge_pr_with_retry "$pr_num" --merge
     else
       # Rebase or squash strategy
       # Look up the ORIGINAL tip from pre-loop snapshot (not current, which may have been rewritten)
@@ -644,7 +672,7 @@ cmd_merge() {
 
       local strategy_flag="--$strategy"
       info "merging #${pr_num} (${BOLD}$branch${RESET}) with ${strategy}..."
-      gh pr merge "$pr_num" "$strategy_flag" 2>/dev/null || die "failed to merge PR #$pr_num"
+      merge_pr_with_retry "$pr_num" "$strategy_flag"
     fi
 
     # Retarget child PR to trunk (don't rely on GitHub auto-retarget)

@@ -1,6 +1,6 @@
 {
   "name": "git-stack",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Lightweight stacked PR manager built on git + gh CLI",
   "scripts": {

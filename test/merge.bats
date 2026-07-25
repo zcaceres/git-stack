@@ -335,7 +335,8 @@ setup_stack_with_prs() {
   mock_gh '
 case "$1:$2" in
   pr:list)
-    echo '"'"'[{"number":1,"headRefName":"feat-a","baseRefName":"main"}]'"'"'
+    # git-stack requests TSV via --jq: headRefName, number, baseRefName, state
+    printf "feat-a\t1\tmain\tOPEN\n"
     ;;
   pr:merge)
     exit 1

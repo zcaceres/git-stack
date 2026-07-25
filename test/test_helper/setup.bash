@@ -86,11 +86,27 @@ mock_gh_with_prs() {
   cat > "$TEST_TMPDIR/mock-bin/gh" <<MOCK_EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$TEST_TMPDIR/gh-calls.log"
-case "\$1:\$2" in
-  pr:list)
-    cat <<'JSON_EOF'
+# Honor a --jq flag the way real gh does: pipe the canned JSON through jq.
+respond() {
+  local json="\$1"; shift
+  local jq_expr="" prev="" a
+  for a in "\$@"; do
+    [ "\$prev" = "--jq" ] && jq_expr="\$a"
+    prev="\$a"
+  done
+  if [ -n "\$jq_expr" ]; then
+    printf '%s\n' "\$json" | jq -r "\$jq_expr"
+  else
+    printf '%s\n' "\$json"
+  fi
+}
+json_data=\$(cat <<'JSON_EOF'
 $json
 JSON_EOF
+)
+case "\$1:\$2" in
+  pr:list)
+    respond "\$json_data" "\$@"
     ;;
   pr:create)
     echo "https://github.com/test/test/pull/99"
@@ -100,7 +116,7 @@ JSON_EOF
   pr:merge)
     ;;
   pr:view)
-    echo '{"baseRefName":"main"}'
+    respond '{"baseRefName":"main"}' "\$@"
     ;;
   auth:status)
     ;;
@@ -130,11 +146,27 @@ mock_gh_with_merge() {
   cat > "$TEST_TMPDIR/mock-bin/gh" <<MOCK_EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$TEST_TMPDIR/gh-calls.log"
-case "\$1:\$2" in
-  pr:list)
-    cat <<'JSON_EOF'
+# Honor a --jq flag the way real gh does: pipe the canned JSON through jq.
+respond() {
+  local json="\$1"; shift
+  local jq_expr="" prev="" a
+  for a in "\$@"; do
+    [ "\$prev" = "--jq" ] && jq_expr="\$a"
+    prev="\$a"
+  done
+  if [ -n "\$jq_expr" ]; then
+    printf '%s\n' "\$json" | jq -r "\$jq_expr"
+  else
+    printf '%s\n' "\$json"
+  fi
+}
+json_data=\$(cat <<'JSON_EOF'
 $json
 JSON_EOF
+)
+case "\$1:\$2" in
+  pr:list)
+    respond "\$json_data" "\$@"
     ;;
   pr:create)
     echo "https://github.com/test/test/pull/99"
@@ -162,7 +194,7 @@ JSON_EOF
     fi
     ;;
   pr:view)
-    echo '{"baseRefName":"main"}'
+    respond '{"baseRefName":"main"}' "\$@"
     ;;
   auth:status)
     ;;

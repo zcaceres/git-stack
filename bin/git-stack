@@ -68,10 +68,14 @@ unset_stack_parent() {
 
 # --- Remote-safe push ---
 
-# Push a branch with an explicit force-with-lease expectation. Captures the
+# Push a branch with force-with-lease plus --force-if-includes. Captures the
 # remote-tracking tip BEFORE fetching, fetches the branch to surface drift,
-# and refuses to push if origin moved — so the lease can never silently
-# degrade to --force against a ref some background fetch already updated.
+# and refuses to push if origin moved. --force-if-includes closes the
+# remaining gap: if a background fetch updated the tracking ref before we
+# snapshotted it, the lease alone would pass — but the remote tip isn't in
+# the local branch's reflog (never integrated), so git rejects the push.
+# The lease expectation must stay implicit (the tracking ref): an explicit
+# :<sha> turns --force-if-includes into a no-op.
 # Brand-new branches (no tracking ref yet) push with plain -u.
 safe_force_push() {
   local branch="$1"
@@ -86,8 +90,8 @@ safe_force_push() {
   if [[ "$now" != "$expected" ]]; then
     die "remote drift on $branch: origin moved ${expected:0:8} → ${now:0:8} — someone else pushed; reconcile before re-running"
   fi
-  git push --force-with-lease="refs/heads/$branch:$expected" origin "$branch" 2>/dev/null \
-    || die "push rejected for $branch — remote changed mid-push; fetch and reconcile"
+  git push --force-with-lease="refs/heads/$branch" --force-if-includes origin "$branch" 2>/dev/null \
+    || die "push rejected for $branch — origin has commits you haven't integrated; fetch and reconcile"
 }
 
 # --- PR lookups (exact-match, no JSON regex) ---

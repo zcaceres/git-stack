@@ -112,7 +112,9 @@ teardown() {
   run git-stack create feat
   assert_failure
   assert_output --partial "could not create branch 'feat'"
-  assert_output --partial "cannot lock ref"
+  # Assert on the backend-neutral tail: the files ref backend prefixes this
+  # with "cannot lock ref '<ref>': "; the reftable backend does not.
+  assert_output --partial "exists; cannot create 'refs/heads/feat'"
 
   [ "$(current_branch)" = "main" ]
   [ -z "$(get_stack_parent feat)" ]

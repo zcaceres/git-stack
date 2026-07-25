@@ -68,7 +68,10 @@ This keeps each consumer repo self-contained — no runtime dependency on this r
 
 ## Development setup
 
+Requires [`jq`](https://jqlang.github.io/jq/) on your PATH, in addition to the runtime dependencies. The `gh` mocks reimplement `--jq` by shelling out to it. `git stack` itself never calls `jq` — `gh` has its own implementation built in — so this is a test-only requirement.
+
 ```bash
+brew install jq          # or your platform's package manager
 bun install
 git config core.hooksPath .githooks
 ```

@@ -43,6 +43,29 @@ teardown() {
   [ "${#output}" -eq 60 ]
 }
 
+@test "slugify does not leave a trailing hyphen after truncation" {
+  # 59 a's then a space: the slug's 60th character is the hyphen the space
+  # became, so truncation must not end the branch name on it.
+  local input
+  input="$(printf 'a%.0s' {1..59}) b"
+  run run_fn slugify "$input"
+  assert_success
+  [ "${#output}" -eq 59 ]
+  [ "${output: -1}" != "-" ]
+}
+
+@test "slugify uses only the first line of a multi-line message" {
+  run run_fn slugify "$(printf 'fix: title line\n\nbody paragraph here.\n')"
+  assert_success
+  assert_output "fix-title-line"
+}
+
+@test "slugify returns empty when the first line is all symbols" {
+  run run_fn slugify "$(printf '!!!\nreal subject\n')"
+  assert_success
+  assert_output ""
+}
+
 @test "slugify returns empty for all-symbol input" {
   run run_fn slugify '!!!@@@###'
   assert_success

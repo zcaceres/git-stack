@@ -92,11 +92,21 @@ mock_gh() {
   chmod +x "$TEST_TMPDIR/mock-bin/gh"
 }
 
+# The gh mocks reimplement gh's --jq by shelling out to jq. git-stack itself
+# never needs it (gh has its own implementation built in), so jq is a
+# test-only requirement — fail with that reason rather than a wall of
+# unexplained assertion errors.
+require_jq() {
+  echo '{}' | jq -r '.' >/dev/null 2>&1 || \
+    fail "working jq not found — the gh mocks require it (brew install jq). git stack itself does not."
+}
+
 # Convenience: create a gh mock that returns canned PR JSON for `pr list`
 # and succeeds silently for pr create/edit/merge/view.
 # Usage: mock_gh_with_prs '<json array>'
 mock_gh_with_prs() {
   local json="$1"
+  require_jq
   cat > "$TEST_TMPDIR/mock-bin/gh" <<MOCK_EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$TEST_TMPDIR/gh-calls.log"
@@ -157,6 +167,7 @@ SLEEP_EOF
 #   mock_gh_with_merge '<json array>'
 mock_gh_with_merge() {
   local json="$1"
+  require_jq
   cat > "$TEST_TMPDIR/mock-bin/gh" <<MOCK_EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$TEST_TMPDIR/gh-calls.log"

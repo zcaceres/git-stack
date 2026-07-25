@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 PROG="git stack"
 _RESTACK_PUSH=true
 
@@ -64,6 +64,46 @@ set_stack_parent() {
 unset_stack_parent() {
   git config --unset "branch.$1.stack-parent" 2>/dev/null || true
   git config --unset "branch.$1.gh-merge-base" 2>/dev/null || true
+}
+
+# --- Remote-safe push ---
+
+# Push a branch with an explicit force-with-lease expectation. Captures the
+# remote-tracking tip BEFORE fetching, fetches the branch to surface drift,
+# and refuses to push if origin moved — so the lease can never silently
+# degrade to --force against a ref some background fetch already updated.
+# Brand-new branches (no tracking ref yet) push with plain -u.
+safe_force_push() {
+  local branch="$1"
+  local expected
+  if ! expected=$(git rev-parse --verify --quiet "refs/remotes/origin/$branch"); then
+    git push -u origin "$branch" 2>/dev/null || die "failed to push new branch $branch"
+    return 0
+  fi
+  git fetch origin "$branch" 2>/dev/null || die "failed to fetch origin/$branch"
+  local now
+  now=$(git rev-parse --verify --quiet "refs/remotes/origin/$branch")
+  if [[ "$now" != "$expected" ]]; then
+    die "remote drift on $branch: origin moved ${expected:0:8} → ${now:0:8} — someone else pushed; reconcile before re-running"
+  fi
+  git push --force-with-lease="refs/heads/$branch:$expected" origin "$branch" 2>/dev/null \
+    || die "push rejected for $branch — remote changed mid-push; fetch and reconcile"
+}
+
+# --- PR lookups (exact-match, no JSON regex) ---
+
+# One TSV row per open PR: headRefName<TAB>number<TAB>baseRefName<TAB>state.
+# gh's --jq does the field extraction, so branch names are never
+# interpolated into a grep pattern and nested JSON can't break parsing.
+fetch_pr_tsv() {
+  local state="$1"
+  gh pr list --state "$state" --json number,headRefName,baseRefName,state --limit 500 \
+    --jq '.[] | [.headRefName, (.number|tostring), (.baseRefName // ""), (.state // "")] | @tsv' 2>/dev/null
+}
+
+# pr_row "$tsv" "$branch" → the branch's row, or empty. Exact string match.
+pr_row() {
+  awk -F'\t' -v b="$2" '$1 == b { print; exit }' <<< "$1"
 }
 
 # --- Stack traversal ---
@@ -227,9 +267,9 @@ cmd_log() {
   fi
 
   # Fetch PR info in one call (may fail if no remote/no gh auth — that's fine)
-  local pr_json=""
+  local pr_tsv=""
   if command -v gh >/dev/null 2>&1; then
-    pr_json=$(gh pr list --state all --json number,headRefName,state,title,url --limit 50 2>/dev/null || true)
+    pr_tsv=$(fetch_pr_tsv all || true)
   fi
 
   local root
@@ -255,13 +295,13 @@ cmd_log() {
 
     # PR info
     local suffix=""
-    if [[ -n "$pr_json" ]]; then
+    if [[ -n "$pr_tsv" ]]; then
       local pr_entry
-      pr_entry=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$branch\"[^}]*}" 2>/dev/null | head -1 || true)
+      pr_entry=$(pr_row "$pr_tsv" "$branch")
       if [[ -n "$pr_entry" ]]; then
         local num state
-        num=$(echo "$pr_entry" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
-        state=$(echo "$pr_entry" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' | head -1)
+        num=$(cut -f2 <<< "$pr_entry")
+        state=$(cut -f4 <<< "$pr_entry")
         case "$state" in
           MERGED) suffix=" ${DIM}(#$num)${RESET} ${GREEN}✓${RESET}" ;;
           OPEN)   suffix=" ${DIM}(#$num)${RESET} ${CYAN}○${RESET}" ;;
@@ -312,13 +352,15 @@ cmd_submit() {
   command -v gh >/dev/null 2>&1 || die "'gh' CLI not found — install it or use the bare git fallback"
 
   # Fetch existing PRs
-  local pr_json
-  pr_json=$(gh pr list --state open --json number,headRefName,baseRefName --limit 50 2>/dev/null) || die "failed to query PRs — check 'gh auth status'"
+  local pr_tsv
+  pr_tsv=$(fetch_pr_tsv open) || die "failed to query PRs — check 'gh auth status'"
 
-  # Process each branch in stack (skip root/trunk)
+  # Process each branch in stack (skip root/trunk). Process substitution,
+  # not a pipe — the loop must run in this shell so `pushed` survives and
+  # a die aborts the command directly.
   local prev_branch=""
   local pushed=0
-  echo "$stack_lines" | while IFS= read -r branch; do
+  while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
 
     if [[ -z "$prev_branch" ]]; then
@@ -329,11 +371,12 @@ cmd_submit() {
     local parent="$prev_branch"
 
     info "pushing ${BOLD}$branch${RESET}..."
-    git push --force-with-lease origin "$branch" 2>/dev/null || git push -u origin "$branch" 2>/dev/null || die "failed to push $branch"
+    safe_force_push "$branch"
+    pushed=$((pushed + 1))
 
     # Check for existing PR
     local existing_pr
-    existing_pr=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$branch\"[^}]*}" 2>/dev/null | head -1 || true)
+    existing_pr=$(pr_row "$pr_tsv" "$branch")
 
     if [[ -z "$existing_pr" ]]; then
       info "creating ${draft_label}PR for ${BOLD}$branch${RESET} → ${parent}..."
@@ -341,9 +384,9 @@ cmd_submit() {
     else
       # Check if base needs updating
       local current_base
-      current_base=$(echo "$existing_pr" | sed -n 's/.*"baseRefName":"\([^"]*\)".*/\1/p' | head -1)
+      current_base=$(cut -f3 <<< "$existing_pr")
       local pr_num
-      pr_num=$(echo "$existing_pr" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
+      pr_num=$(cut -f2 <<< "$existing_pr")
 
       if [[ "$current_base" != "$parent" ]]; then
         info "retargeting #${pr_num} base: ${current_base} → ${parent}..."
@@ -354,9 +397,9 @@ cmd_submit() {
     fi
 
     prev_branch="$branch"
-  done
+  done < <(echo "$stack_lines")
 
-  printf "\n${GREEN}✓${RESET} stack submitted (%d branches pushed)\n" $((stack_count - 1))
+  printf "\n${GREEN}✓${RESET} stack submitted (%d branches pushed)\n" "$pushed"
 }
 
 # --- Restack helper ---
@@ -373,7 +416,7 @@ restack_onto() {
   git checkout "$branch" 2>/dev/null || die "failed to checkout $branch"
   git rebase --onto "$new_base" "$old_parent_tip" "$branch" 2>/dev/null || die "rebase conflict on $branch — resolve manually"
   if [[ "$_RESTACK_PUSH" == true ]]; then
-    git push --force-with-lease origin "$branch" 2>/dev/null || die "failed to push rebased $branch"
+    safe_force_push "$branch"
   fi
 
   # Recurse into children, using this branch's old tip as their rebase boundary
@@ -389,13 +432,10 @@ restack_onto() {
 
 cmd_sync() {
   require_git_repo
-  local original_branch
-  original_branch=$(require_not_detached)
-
-  git diff-index --quiet HEAD -- 2>/dev/null || die "working tree is dirty — commit or stash changes first"
-
   local do_push=true
 
+  # Parse flags before any state guards, so `sync --help` works on a
+  # dirty tree.
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-push) do_push=false; shift ;;
@@ -404,6 +444,11 @@ cmd_sync() {
       *) die "unexpected argument: $1" ;;
     esac
   done
+
+  local original_branch
+  original_branch=$(require_not_detached)
+
+  git diff-index --quiet HEAD -- 2>/dev/null || die "working tree is dirty — commit or stash changes first"
 
   local trunk
   trunk=$(trunk_branch)
@@ -552,25 +597,20 @@ cmd_merge() {
   fi
 
   # Get open PRs
-  local pr_json
-  pr_json=$(gh pr list --state open --json number,headRefName,baseRefName --limit 50 2>/dev/null) || die "failed to query PRs — check 'gh auth status'"
+  local pr_tsv
+  pr_tsv=$(fetch_pr_tsv open) || die "failed to query PRs — check 'gh auth status'"
 
-  # Build ordered list of branches to merge (skip trunk)
-  local branches_to_merge=""
-  echo "$stack_lines" | tail -n +2 | while IFS= read -r branch; do
-    [[ -z "$branch" ]] && continue
-    local pr_entry
-    pr_entry=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$branch\"[^}]*}" 2>/dev/null | head -1 || true)
-    if [[ -n "$pr_entry" ]]; then
-      local pr_num
-      pr_num=$(echo "$pr_entry" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
-      echo "$branch:$pr_num"
-    fi
-  done > /tmp/git-stack-merge-$$
-
+  # Build ordered list of branches to merge (skip trunk). Captured straight
+  # into a variable — no predictable /tmp files, nothing left behind on
+  # failure.
   local merge_list
-  merge_list=$(cat /tmp/git-stack-merge-$$ 2>/dev/null || true)
-  rm -f /tmp/git-stack-merge-$$
+  merge_list=$(echo "$stack_lines" | tail -n +2 | while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+    pr_entry=$(pr_row "$pr_tsv" "$branch")
+    if [[ -n "$pr_entry" ]]; then
+      printf '%s:%s\n' "$branch" "$(cut -f2 <<< "$pr_entry")"
+    fi
+  done)
 
   if [[ -z "$merge_list" ]]; then
     die "no open PRs found in the stack"
@@ -596,21 +636,18 @@ cmd_merge() {
   original_branch=$(current_branch)
 
   # Snapshot original branch tips before any rewrites (needed for --onto rebase boundaries)
-  local tip_snapshot=""
-  echo "$merge_list" | while IFS=: read -r b _; do
+  local tip_snapshot
+  tip_snapshot=$(echo "$merge_list" | while IFS=: read -r b _; do
     [[ -z "$b" ]] && continue
-    local sha
-    sha=$(git rev-parse "$b" 2>/dev/null || echo "unknown")
-    echo "$b:$sha"
-  done > /tmp/git-stack-tips-$$
-  tip_snapshot=$(cat /tmp/git-stack-tips-$$ 2>/dev/null || true)
-  rm -f /tmp/git-stack-tips-$$
+    echo "$b:$(git rev-parse "$b" 2>/dev/null || echo "unknown")"
+  done)
 
-  # Merge each PR bottom-up
+  # Merge each PR bottom-up. Process substitution, not a pipe — the loop
+  # must run in this shell so `merged` survives and a die aborts directly.
   local merged=0
   local remaining_list="$merge_list"
 
-  echo "$merge_list" | while IFS=: read -r branch pr_num; do
+  while IFS=: read -r branch pr_num; do
     [[ -z "$branch" ]] && continue
 
     # Find child PR (the next line in remaining_list, or check for children)
@@ -626,10 +663,10 @@ cmd_merge() {
       child_b=$(find_children "$branch" | head -1)
       if [[ -n "$child_b" ]]; then
         local child_entry
-        child_entry=$(echo "$pr_json" | grep -o "{[^}]*\"headRefName\":\"$child_b\"[^}]*}" 2>/dev/null | head -1 || true)
+        child_entry=$(pr_row "$pr_tsv" "$child_b")
         if [[ -n "$child_entry" ]]; then
           child_branch="$child_b"
-          child_pr=$(echo "$child_entry" | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | head -1)
+          child_pr=$(cut -f2 <<< "$child_entry")
         fi
       fi
     fi
@@ -668,19 +705,20 @@ cmd_merge() {
       else
         git rebase "origin/$trunk" 2>/dev/null || die "rebase conflict — resolve manually, then re-run merge"
       fi
-      git push --force-with-lease origin "$branch" 2>/dev/null || die "failed to push rebased $branch"
+      safe_force_push "$branch"
 
       local strategy_flag="--$strategy"
       info "merging #${pr_num} (${BOLD}$branch${RESET}) with ${strategy}..."
       merge_pr_with_retry "$pr_num" "$strategy_flag"
     fi
 
-    # Retarget child PR to trunk (don't rely on GitHub auto-retarget)
+    # Retarget child PR to trunk (don't rely on GitHub auto-retarget), then
+    # poll with backoff until GitHub reports the new base.
     if [[ -n "$child_pr" ]]; then
       info "retargeting #${child_pr} to ${trunk}..."
-      # Give GitHub a moment, then force retarget
-      sleep 2
       gh pr edit "$child_pr" --base "$trunk" 2>/dev/null || die "failed to retarget PR #$child_pr to $trunk"
+      wait_for_retarget "$child_pr" "$trunk" \
+        || die "PR #$child_pr base did not settle on $trunk — verify with: gh pr view $child_pr --json baseRefName"
       info "#${child_pr} retargeted to ${trunk} ✓"
     fi
 
@@ -703,7 +741,7 @@ cmd_merge() {
     unset_stack_parent "$branch"
 
     merged=$((merged + 1))
-  done
+  done < <(echo "$merge_list")
 
   # Sync local state
   git fetch --prune 2>/dev/null || true
@@ -715,7 +753,7 @@ cmd_merge() {
     git checkout "$trunk" 2>/dev/null || true
   fi
 
-  printf "\n${GREEN}✓${RESET} merged %d PR(s) using %s strategy\n" "$merge_count" "$strategy"
+  printf "\n${GREEN}✓${RESET} merged %d PR(s) using %s strategy\n" "$merged" "$strategy"
 }
 
 # --- Usage ---

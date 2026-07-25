@@ -247,3 +247,12 @@ advance_trunk() {
   [ "$(git merge-base "$main_tip" feat-a)" = "$main_tip" ]
   [ "$(git merge-base "$main_tip" feat-c)" = "$main_tip" ]
 }
+
+@test "sync --help works on a dirty worktree" {
+  create_linear_stack feat-a
+  echo "dirty" >> feat-a.txt
+
+  run git-stack sync --help
+  assert_success
+  assert_output --partial "Usage:"
+}

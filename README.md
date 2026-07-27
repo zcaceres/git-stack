@@ -55,6 +55,25 @@ Three strategies:
 
 **Important:** Never use `gh pr merge --delete-branch` with stacked PRs. GitHub's auto-retarget is a repo setting, not guaranteed. Deleting a base branch can auto-close child PRs irrecoverably.
 
+#### If `merge --all` stops partway
+
+`merge --all` lands one PR at a time, so a failure midway leaves the PRs below it already merged. Remote drift, a rebase conflict, or a push rejection all abort at that point by design — continuing would push a branch built on a stale base.
+
+Nothing is lost. Resolve the reported cause, then re-run `git stack merge --all`: it re-reads open PRs from GitHub, so already-merged ones drop out of the list and it resumes from the first one still open.
+
+Before re-running, confirm the remaining PRs point where you expect:
+
+```bash
+gh pr list --author @me --json number,baseRefName,state \
+  -q '.[] | "\(.number) \(.baseRefName) \(.state)"'
+```
+
+A child whose parent merged should read `main`. If one still names a deleted or merged branch, retarget it before resuming:
+
+```bash
+gh pr edit <PR> --base main
+```
+
 ## Bundling in downstream repos
 
 Consumer repos (like [claude-stacked-prs](https://github.com/zcaceres/claude-stacked-prs) and [gemini-stacked-prs](https://github.com/zcaceres/gemini-stacked-prs)) bundle a copy of `bin/git-stack` and symlink it during install. To update the bundled copy to the latest release:

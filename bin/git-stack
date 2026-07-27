@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.3.2"
 PROG="git stack"
 _RESTACK_PUSH=true
 
@@ -24,6 +24,17 @@ fi
 die() { printf "${RED}error:${RESET} %s\n" "$*" >&2; exit 1; }
 warn() { printf "${YELLOW}warn:${RESET} %s\n" "$*" >&2; }
 info() { printf "${CYAN}•${RESET} %s\n" "$*"; }
+
+# Run a command quietly, but die with its own output appended when it fails.
+# Use at sites where a silent failure strands a stack mid-flight — the
+# operator needs git's or gh's reason, not just "failed to retarget".
+run_or_die() {
+  local msg="$1"; shift
+  local out
+  if ! out=$("$@" 2>&1); then
+    die "$msg: $out"
+  fi
+}
 
 require_git_repo() {
   git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository"
@@ -81,17 +92,17 @@ safe_force_push() {
   local branch="$1"
   local expected
   if ! expected=$(git rev-parse --verify --quiet "refs/remotes/origin/$branch"); then
-    git push -u origin "$branch" 2>/dev/null || die "failed to push new branch $branch"
+    run_or_die "failed to push new branch $branch" git push -u origin "$branch"
     return 0
   fi
-  git fetch origin "$branch" 2>/dev/null || die "failed to fetch origin/$branch"
+  run_or_die "failed to fetch origin/$branch" git fetch origin "$branch"
   local now
   now=$(git rev-parse --verify --quiet "refs/remotes/origin/$branch")
   if [[ "$now" != "$expected" ]]; then
     die "remote drift on $branch: origin moved ${expected:0:8} → ${now:0:8} — someone else pushed; reconcile before re-running"
   fi
-  git push --force-with-lease="refs/heads/$branch" --force-if-includes origin "$branch" 2>/dev/null \
-    || die "push rejected for $branch — origin has commits you haven't integrated; fetch and reconcile"
+  run_or_die "push rejected for $branch — origin has commits you haven't integrated; fetch and reconcile" \
+    git push --force-with-lease="refs/heads/$branch" --force-if-includes origin "$branch"
 }
 
 # --- PR lookups (exact-match, no JSON regex) ---
@@ -394,7 +405,8 @@ cmd_submit() {
 
       if [[ "$current_base" != "$parent" ]]; then
         info "retargeting #${pr_num} base: ${current_base} → ${parent}..."
-        gh pr edit "$pr_num" --base "$parent" 2>/dev/null || die "failed to retarget PR #$pr_num — stack is in an inconsistent state, fix manually with: gh pr edit $pr_num --base $parent"
+        run_or_die "failed to retarget PR #$pr_num — stack is in an inconsistent state, fix manually with: gh pr edit $pr_num --base $parent" \
+          gh pr edit "$pr_num" --base "$parent"
       else
         info "#${pr_num} already targets ${parent} ✓"
       fi
@@ -418,7 +430,8 @@ restack_onto() {
 
   info "restacking ${BOLD}$branch${RESET} onto ${new_base}..."
   git checkout "$branch" 2>/dev/null || die "failed to checkout $branch"
-  git rebase --onto "$new_base" "$old_parent_tip" "$branch" 2>/dev/null || die "rebase conflict on $branch — resolve manually"
+  run_or_die "rebase conflict on $branch — resolve manually" \
+    git rebase --onto "$new_base" "$old_parent_tip" "$branch"
   if [[ "$_RESTACK_PUSH" == true ]]; then
     safe_force_push "$branch"
   fi
@@ -688,7 +701,7 @@ cmd_merge() {
       fi
 
       info "retargeting #${pr_num} to ${trunk}..."
-      gh pr edit "$pr_num" --base "$trunk" 2>/dev/null || die "failed to retarget PR #$pr_num to $trunk"
+      run_or_die "failed to retarget PR #$pr_num to $trunk" gh pr edit "$pr_num" --base "$trunk"
 
       info "rebasing ${BOLD}$branch${RESET} onto ${trunk}..."
       git fetch origin "$trunk" 2>/dev/null || die "failed to fetch $trunk"
@@ -702,12 +715,13 @@ cmd_merge() {
         local onto_boundary
         onto_boundary=$(echo "$tip_snapshot" | grep "^${prev_in_list}:" | head -1 | cut -d: -f2)
         if [[ -n "$onto_boundary" && "$onto_boundary" != "unknown" ]]; then
-          git rebase --onto "origin/$trunk" "$onto_boundary" "$branch" 2>/dev/null || die "rebase conflict — resolve manually, then re-run merge"
+          run_or_die "rebase conflict — resolve manually, then re-run merge" \
+            git rebase --onto "origin/$trunk" "$onto_boundary" "$branch"
         else
-          git rebase "origin/$trunk" 2>/dev/null || die "rebase conflict — resolve manually, then re-run merge"
+          run_or_die "rebase conflict — resolve manually, then re-run merge" git rebase "origin/$trunk"
         fi
       else
-        git rebase "origin/$trunk" 2>/dev/null || die "rebase conflict — resolve manually, then re-run merge"
+        run_or_die "rebase conflict — resolve manually, then re-run merge" git rebase "origin/$trunk"
       fi
       safe_force_push "$branch"
 
@@ -720,7 +734,7 @@ cmd_merge() {
     # poll with backoff until GitHub reports the new base.
     if [[ -n "$child_pr" ]]; then
       info "retargeting #${child_pr} to ${trunk}..."
-      gh pr edit "$child_pr" --base "$trunk" 2>/dev/null || die "failed to retarget PR #$child_pr to $trunk"
+      run_or_die "failed to retarget PR #$child_pr to $trunk" gh pr edit "$child_pr" --base "$trunk"
       wait_for_retarget "$child_pr" "$trunk" \
         || die "PR #$child_pr base did not settle on $trunk — verify with: gh pr view $child_pr --json baseRefName"
       info "#${child_pr} retargeted to ${trunk} ✓"

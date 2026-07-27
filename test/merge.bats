@@ -455,6 +455,34 @@ esac'
   run git-stack merge --rebase
   assert_failure
   assert_output --partial "rebase conflict"
+
+  # git writes the CONFLICT line to stdout but "could not apply" and the
+  # resolution hints to stderr, which used to be discarded.
+  assert_output --partial "could not apply"
+}
+
+@test "merge surfaces gh's reason when a child retarget fails" {
+  create_linear_stack feat-a feat-b
+  git push origin feat-a feat-b >/dev/null 2>&1
+  mock_sleep
+
+  mock_gh '
+case "$1:$2" in
+  pr:list)
+    printf "feat-a\t1\tmain\tOPEN\nfeat-b\t2\tfeat-a\tOPEN\n"
+    ;;
+  pr:edit)
+    echo "GraphQL: Base branch cannot be modified (updatePullRequest)" >&2
+    exit 1
+    ;;
+  *)
+    ;;
+esac'
+
+  run git-stack merge
+  assert_failure
+  assert_output --partial "failed to retarget PR #2 to main"
+  assert_output --partial "Base branch cannot be modified"
 }
 
 @test "merge --all with child outside merge list retargets and restacks child" {

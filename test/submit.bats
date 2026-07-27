@@ -149,3 +149,30 @@ teardown() {
   assert_success
   assert_output --partial "2 branches pushed"
 }
+
+@test "submit refuses remote commits even after a background fetch" {
+  create_linear_stack feat-a
+  git push -u origin feat-a >/dev/null 2>&1
+  mock_gh_with_prs '[]'
+
+  # Teammate pushes to origin/feat-a...
+  export GIT_DIR="$TEST_TMPDIR/origin.git"
+  tip=$(git rev-parse refs/heads/feat-a)
+  new_commit=$(echo "teammate work" | git commit-tree "${tip}^{tree}" -p "$tip")
+  git update-ref refs/heads/feat-a "$new_commit"
+  unset GIT_DIR
+
+  # ...and a background fetch (IDE, status check) updates our tracking ref
+  # BEFORE submit snapshots it — the drift check alone can't see this.
+  git fetch origin >/dev/null 2>&1
+
+  run git-stack submit
+  assert_failure
+  assert_output --partial "push rejected"
+  refute_gh_called "pr create"
+
+  # The teammate's commit must survive on the remote.
+  export GIT_DIR="$TEST_TMPDIR/origin.git"
+  [ "$(git rev-parse refs/heads/feat-a)" = "$new_commit" ]
+  unset GIT_DIR
+}

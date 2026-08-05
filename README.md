@@ -1,5 +1,18 @@
 # git-stack
 
+> [!WARNING]
+> **Deprecated: use GitHub's first-party [`gh stack`](https://github.com/github/gh-stack) extension for new stacked-PR workflows.** It is the maintained implementation and creates GitHub's native stacked pull request objects, including remote stack discovery, synchronization, restructuring, and merge-queue-aware merges. This repository remains available for existing installations and vendored consumers, but it is no longer the recommended tool or the place for new features.
+>
+> Install the replacement with:
+>
+> ```bash
+> gh extension install github/gh-stack
+> ```
+>
+> Start a new workflow with `gh stack init`, create layers with `gh stack add`, publish with `gh stack submit`, and synchronize with `gh stack sync`. `gh stack` is currently a GitHub public preview, so follow its [official documentation](https://docs.github.com/en/pull-requests/get-started/stacked-prs-quickstart) for current behavior.
+>
+> Two `git-stack` conveniences do not map one-for-one: use `gh stack rebase` followed by `gh stack push` instead of `git stack sync --no-push`; and use `gh stack view` plus the interactive merge confirmation instead of `git stack merge --dry-run`.
+
 Lightweight stacked PR manager. Single bash script. Requires only `git` and [`gh`](https://cli.github.com/).
 
 Stack parent relationships are stored in `git config` (`branch.<name>.stack-parent`). No external services, no auth beyond `gh auth login`.
